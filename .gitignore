@@ -8,4 +8,4 @@ __pycache__/
 debug.ipynb
 .DS_Store
 examples/
-dino_labeled_images/
+dino_labled_images/

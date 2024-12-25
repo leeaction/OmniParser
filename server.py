@@ -15,7 +15,7 @@ from PIL import Image
 import logging
 
 PORT = 8899
-DINO_LABLED_IMAGE_DIR = "dino_labeled_images"
+DINO_LABLED_IMAGE_DIR = "dino_labled_images"
 
 class MyApp(Application):
     def __init__(self, *args, **kwargs):
@@ -141,7 +141,7 @@ class ImageHandler(RequestHandler):
 if __name__ == "__main__":
     app = MyApp([
         (r"/caption", ProcessHandler, dict(app=None)),
-        (r"/dino_labeled_images/(.*)", ImageHandler),
+        (r"/dino_labled_images/(.*)", ImageHandler),
     ])
 
     # Update handlers to pass app instance correctly
