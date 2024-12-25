@@ -19,6 +19,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
+
+from util.remote_caption import generate_api
 reader = easyocr.Reader(['en'])
 paddle_ocr = PaddleOCR(
     lang='ch',  # other lang also available
@@ -116,7 +118,33 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
     
     return generated_texts
 
+def get_parsed_content_icon_api(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=None, batch_size=32):
+    to_pil = ToPILImage()
+    if starting_idx:
+        non_ocr_boxes = filtered_boxes[starting_idx:]
+    else:
+        non_ocr_boxes = filtered_boxes
+    croped_pil_image = []
+    for i, coord in enumerate(non_ocr_boxes):
+        xmin, xmax = int(coord[0]*image_source.shape[1]), int(coord[2]*image_source.shape[1])
+        ymin, ymax = int(coord[1]*image_source.shape[0]), int(coord[3]*image_source.shape[0])
+        cropped_image = image_source[ymin:ymax, xmin:xmax, :]
+        croped_pil_image.append(to_pil(cropped_image))
 
+    generated_texts = []
+
+    for i in range(0, len(croped_pil_image), batch_size):
+        start = time.time()
+        if not prompt:
+            prompt = "the image shows"
+        batch = croped_pil_image[i:i+batch_size]
+
+        generated_text = generate_api(batch, prompt)
+        generated_text = [gen.strip() for gen in generated_text]
+            
+        generated_texts.extend(generated_text)
+    
+    return generated_texts
 
 def get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, caption_model_processor):
     to_pil = ToPILImage()
@@ -452,8 +480,18 @@ def get_som_labeled_img(img_path, model=None, BOX_TRESHOLD = 0.01, output_coord_
             parsed_content_icon_ls.append(f"Icon Box ID {str(i+icon_start)}: {txt}")
         parsed_content_merged = ocr_text + parsed_content_icon_ls
     else:
+        parsed_content_icon = get_parsed_content_icon_api(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt, batch_size=batch_size)
+
         ocr_text = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
-        parsed_content_merged = ocr_text
+        icon_start = len(ocr_text)
+        parsed_content_icon_ls = []
+        # fill the filtered_boxes_elem None content with parsed_content_icon in order
+        for i, box in enumerate(filtered_boxes_elem):
+            if box['content'] is None:
+                box['content'] = parsed_content_icon.pop(0)
+        for i, txt in enumerate(parsed_content_icon):
+            parsed_content_icon_ls.append(f"Icon Box ID {str(i+icon_start)}: {txt}")
+        parsed_content_merged = ocr_text + parsed_content_icon_ls
 
     filtered_boxes = box_convert(boxes=filtered_boxes, in_fmt="xyxy", out_fmt="cxcywh")
 

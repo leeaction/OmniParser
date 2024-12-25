@@ -7,4 +7,5 @@ weights/icon_detect_v1_5_2/
 __pycache__/
 debug.ipynb
 .DS_Store
-temp_images/
+examples/
+dino_labeled_images/

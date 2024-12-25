@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import tempfile
 import uuid
 import socket
 from tornado.ioloop import IOLoop
@@ -8,36 +9,38 @@ from tornado.web import Application, RequestHandler
 from PIL import Image
 import io
 
-import numpy as np
-import torch
-
-
 import base64, os
-from utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
-import torch
+from omniparser import Omniparser
 from PIL import Image
-
 import logging
 
-TEMP_IMAGE_DIR = "temp_images"
-os.makedirs(TEMP_IMAGE_DIR, exist_ok=True)
+PORT = 8899
+DINO_LABLED_IMAGE_DIR = "dino_labeled_images"
 
 class MyApp(Application):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.local_ip = self._get_local_ip()
+        self._local_ip = self._get_local_ip()
+        self._port = PORT
         self.initialize_app()
 
     def initialize_app(self):
-        print("Performing application initialization...")
-        print(f"Local IP Address: {self.local_ip}")
-        icon_detect_model =  "weights/icon_detect_v1_5/model_v1_5.pt"
-        icon_caption_model = "florence2"
-        self.yolo_model = get_yolo_model(model_path=icon_detect_model)
-        if icon_caption_model == 'florence2':
-            self.caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence")
-        elif icon_caption_model == 'blip2':
-            self.caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path="weights/icon_caption_blip2")
+        config = {
+            'som_model_path': 'weights/icon_detect_v1_5/model_v1_5.pt',
+            'device': 'cpu',
+            'caption_model_path': 'Salesforce/blip2-opt-2.7b',
+            'draw_bbox_config': {
+                'text_scale': 0.8,
+                'text_thickness': 2,
+                'text_padding': 3,
+                'thickness': 3,
+            },
+            'BOX_TRESHOLD': 0.05
+        }
+
+        os.makedirs(DINO_LABLED_IMAGE_DIR, exist_ok=True)
+        self._parser = Omniparser(config)
+        
 
     def _get_local_ip(self):
         # 创建UDP socket并获取真实IP地址（无需实际发送数据）
@@ -48,48 +51,31 @@ class MyApp(Application):
                 return s.getsockname()[0]
         except Exception:
             return "127.0.0.1"  # 备用地址
-            
+        
+    def caption(self, image_input_base64: str, prompt: str):
+        image_data = base64.b64decode(image_input_base64)
+        image = Image.open(io.BytesIO(image_data))
 
-    def process(self, image_input_base64: str, box_threshold: float, iou_threshold: float, use_paddleocr: bool, imgsz: tuple, icon_process_batch_size: int) -> tuple:
-        try:
-            image_data = base64.b64decode(image_input_base64)
-            image = Image.open(io.BytesIO(image_data))
-            image_save_path = "imgs/temp_image.jpg"
-            image.save(image_save_path)
-            print(f"Image saved to {image_save_path}")
-        except Exception as e:
-            raise ValueError(f"Failed to save image: {e}")
-        
-        
-        box_overlay_ratio = image.size[0] / 3200
-        draw_bbox_config = {
-            'text_scale': 0.8 * box_overlay_ratio,
-            'text_thickness': max(int(2 * box_overlay_ratio), 1),
-            'text_padding': max(int(3 * box_overlay_ratio), 1),
-            'thickness': max(int(3 * box_overlay_ratio), 1),
-        }
-        # import pdb; pdb.set_trace()
-    
-        ocr_bbox_rslt, is_goal_filtered = check_ocr_box(image_save_path, display_img = False, output_bb_format='xyxy', goal_filtering=None, easyocr_args={'paragraph': False, 'text_threshold':0.9}, use_paddleocr=use_paddleocr)
-        text, ocr_bbox = ocr_bbox_rslt
-        # print('prompt:', prompt)
-        dino_labled_img, label_coordinates, parsed_content_list = get_som_labeled_img(image_save_path, self.yolo_model, BOX_TRESHOLD = box_threshold, output_coord_in_ratio=True, ocr_bbox=ocr_bbox,draw_bbox_config=draw_bbox_config, caption_model_processor=self.caption_model_processor, ocr_text=text,iou_threshold=iou_threshold, imgsz=imgsz, batch_size=icon_process_batch_size)  
-        out_image_data = base64.b64decode(dino_labled_img)
-        out_image = Image.open(io.BytesIO(out_image_data))
+        temp_dir = tempfile.gettempdir()
+        random_filename = str(uuid.uuid4()) + ".png"
+        temp_image_file = os.path.join(temp_dir, random_filename)
+        image.save(temp_image_file)
+
+        dino_labled_img, parsed_content_list = self._parser.parse(temp_image_file, prompt)
 
         # Save the image to a unique file
-        unique_filename = f"{uuid.uuid4().hex}.jpg"
-        out_image_save_path = os.path.join(TEMP_IMAGE_DIR, unique_filename)
-        out_image.save(out_image_save_path)
+        unique_filename = f"{uuid.uuid4().hex}.png"
+        out_image_save_path = os.path.join(DINO_LABLED_IMAGE_DIR, unique_filename)
+        dino_labled_img.save(out_image_save_path,  format='PNG')
         print(f"Image saved to {out_image_save_path}")
 
         # Generate the URL with the local IP address
-        image_url = f"http://{self.local_ip}:8899/{TEMP_IMAGE_DIR}/{unique_filename}"    
+        image_url = f"http://{self._local_ip}:{self._port}/{DINO_LABLED_IMAGE_DIR}/{unique_filename}"    
 
         print('finish processing')
-        # parsed_content_list = '\n'.join(parsed_content_list)
-        # parsed_content_list = '\n'.join([f'type: {x['type']}, content: {x["content"]}, interactivity: {x["interactivity"]}' for x in parsed_content_list])
+
         return image_url, parsed_content_list
+
 
 class ProcessHandler(RequestHandler):
     def initialize(self, app):
@@ -102,32 +88,29 @@ class ProcessHandler(RequestHandler):
 
             # Extract parameters
             image_input_base64 = request_data.get("image_input_base64")
-            box_threshold = float(request_data.get("box_threshold", 0.05))
-            iou_threshold = float(request_data.get("iou_threshold", 0.1))
-            use_paddleocr = bool(request_data.get("use_paddleocr", True))
-            imgsz = tuple(request_data.get("imgsz", (640, 640)))
-            icon_process_batch_size = int(request_data.get("icon_process_batch_size", 64))
+            prompt = request_data.get("prompt")
 
             # Validate input
             if not image_input_base64 or not isinstance(image_input_base64, str):
                 self.set_status(400)
                 self.write({"error": "Invalid image_input_base64"})
                 return
+            
+            if not prompt or not isinstance(prompt, str):
+                self.set_status(400)
+                self.write({"error": "Invalid prompt"})
+                return
 
-            # Call process function
-            image_url, description = self.app.process(
+            # Call caption function
+            image_url, parsed_content_list = self.app.caption(
                 image_input_base64,
-                box_threshold,
-                iou_threshold,
-                use_paddleocr,
-                imgsz,
-                icon_process_batch_size,
+                prompt,
             )
 
             # Create response with image URL
             response_data = {
                 "image_url": image_url,
-                "description": description,
+                "description": str(parsed_content_list),
             }
 
             self.set_status(200)
@@ -136,18 +119,20 @@ class ProcessHandler(RequestHandler):
         except Exception as e:
             self.set_status(500)
             self.write({"error": str(e)})
+            logging.exception(e)
 
 class ImageHandler(RequestHandler):
     def get(self, filename):
         try:
-            image_path = os.path.join(TEMP_IMAGE_DIR, filename)
+            image_path = os.path.join(DINO_LABLED_IMAGE_DIR, filename)
+
             if not os.path.exists(image_path):
                 self.set_status(404)
                 self.write({"error": "Image not found"})
                 return
 
             with open(image_path, "rb") as f:
-                self.set_header("Content-Type", "image/jpeg")
+                self.set_header("Content-Type", "image/png")
                 self.write(f.read())
         except Exception as e:
             self.set_status(500)
@@ -155,15 +140,15 @@ class ImageHandler(RequestHandler):
 
 if __name__ == "__main__":
     app = MyApp([
-        (r"/process", ProcessHandler, dict(app=None)),
-        (r"/temp_images/(.*)", ImageHandler),
+        (r"/caption", ProcessHandler, dict(app=None)),
+        (r"/dino_labeled_images/(.*)", ImageHandler),
     ])
 
     # Update handlers to pass app instance correctly
     app.add_handlers(".*$", [
-        (r"/process", ProcessHandler, dict(app=app)),
+        (r"/caption", ProcessHandler, dict(app=app)),
     ])
 
-    app.listen(8899)
+    app.listen(PORT)
     print("Server running on http://localhost:8899")
     IOLoop.current().start()
