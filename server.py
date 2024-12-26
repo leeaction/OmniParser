@@ -110,7 +110,7 @@ class ProcessHandler(RequestHandler):
             # Create response with image URL
             response_data = {
                 "image_url": image_url,
-                "description": str(parsed_content_list),
+                "image_captions": str(parsed_content_list),
             }
 
             self.set_status(200)
